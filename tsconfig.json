@@ -3,8 +3,13 @@
     "noImplicitAny": false,
     "noEmitOnError": true,
     "removeComments": false,
-    "sourceMap": true,
-    "target": "es2015"
+    "sourceMap": false,
+    "strict": true,
+    "target": "es5",
+    "outFile": "./phprtc-client.js",
+    "moduleResolution": "Classic",
+    "module": "None",
+    "strictPropertyInitialization": false
   },
   "include": [
     "index.ts"

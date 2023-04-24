@@ -2,7 +2,7 @@
   "name": "@phprtc/clientside",
   "version": "1.0.0",
   "description": "PHP RTC Clientside",
-  "main": "index.js",
+  "main": "index.ts",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -13,7 +13,8 @@
   ],
   "author": "phprtc",
   "license": "MIT",
-  "dependencies": {
-    "@types/node": "^18.0.6"
+  "devDependencies": {
+    "@types/node": "^18.16.0",
+    "typescript": "^5.0.4"
   }
 }
