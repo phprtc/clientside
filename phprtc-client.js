@@ -36,6 +36,44 @@ var RTC_Event = /** @class */ (function () {
     };
     return RTC_Event;
 }());
+var RTC_Room = /** @class */ (function () {
+    function RTC_Room(wsUri, name) {
+        var _this = this;
+        this.wsUri = wsUri;
+        this.name = name;
+        this.connection = new RTC_Websocket(wsUri).connect();
+        this.connection.onOpen(function () {
+            _this.connection.send('join', name, {
+                type: 'room',
+                name: _this.name,
+            });
+        });
+    }
+    RTC_Room.prototype.onMessage = function (listener) {
+        this.connection.onMessage(listener);
+        return this;
+    };
+    RTC_Room.prototype.onEvent = function (name, listener) {
+        this.connection.onEvent(name, listener);
+        return this;
+    };
+    RTC_Room.prototype.send = function (data) {
+        return this.connection.send('message', data, {
+            type: 'room',
+            name: this.name,
+        });
+    };
+    RTC_Room.prototype.leave = function () {
+        return this.connection.send('leave', null, {
+            type: 'room',
+            name: this.name,
+        });
+    };
+    RTC_Room.prototype.getConnection = function () {
+        return this.connection;
+    };
+    return RTC_Room;
+}());
 var RTC_Websocket = /** @class */ (function () {
     function RTC_Websocket(wsUri, options) {
         if (options === void 0) { options = []; }
@@ -48,16 +86,14 @@ var RTC_Websocket = /** @class */ (function () {
         this.defaultAuthToken = null;
         this.event = new RTC_Event();
         // HANDLE MESSAGE/EVENT DISPATCH WHEN DOM FINISHED LOADING
-        this.onReady(function () {
-            // Inspect messages and dispatch event
-            _this.onMessage(function (payload) {
-                if (payload.event) {
-                    // Dispatch unfiltered event events
-                    _this.event.dispatch('event', [payload]);
-                    // Dispatch filtered event event
-                    _this.event.dispatch('event.' + payload.event, [payload]);
-                }
-            });
+        // Inspect messages and dispatch event
+        this.onMessage(function (payload) {
+            if (payload.event) {
+                // Dispatch unfiltered event events
+                _this.event.dispatch('event', [payload]);
+                // Dispatch filtered event event
+                _this.event.dispatch('event.' + payload.event, [payload]);
+            }
         });
     }
     /**
@@ -100,10 +136,10 @@ var RTC_Websocket = /** @class */ (function () {
     RTC_Websocket.prototype.onMessage = function (listener) {
         this.event.on('message', function (payload) {
             if ('string' === typeof payload.data) {
-                listener(JSON.parse(payload.data), payload);
+                listener(JSON.parse(payload.data));
             }
             else {
-                listener(payload, payload);
+                listener(payload);
             }
         });
         return this;
@@ -245,16 +281,17 @@ var RTC_Websocket = /** @class */ (function () {
      * Send message to websocket server
      * @param event {any} event name
      * @param message {array|object|int|float|string} message
+     * @param receiver {LooseObject}
      * @return Promise
      */
-    RTC_Websocket.prototype.send = function (event, message) {
+    RTC_Websocket.prototype.send = function (event, message, receiver) {
         var _this = this;
-        if (message === void 0) { message = {}; }
+        if (receiver === void 0) { receiver = {}; }
         event = JSON.stringify({
             event: event,
             message: message,
+            receiver: receiver,
             time: new Date().getTime(),
-            token: this.defaultAuthToken
         });
         //Send message
         return new Promise(function (resolve, reject) {
@@ -324,6 +361,9 @@ var RTC_Websocket = /** @class */ (function () {
             var args = [];
             for (var _i = 0; _i < arguments.length; _i++) {
                 args[_i] = arguments[_i];
+            }
+            if (_this.defaultAuthToken) {
+                _this.send('auth.token', _this.defaultAuthToken);
             }
             if ('reconnecting' === _this.connectionState) {
                 _this.event.dispatch('reconnect');

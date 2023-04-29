@@ -1,3 +1,18 @@
+interface LooseObject {
+    [key: string]: any
+}
+
+interface WSEvent {
+    event: string
+    time: number
+    data: {
+        message: string
+        sender_type: string
+        sender_sid?: string
+    }
+    meta?: LooseObject
+}
+
 class RTC_Event {
     listeners: {};
 
@@ -43,6 +58,51 @@ class RTC_Event {
     }
 }
 
+class RTC_Room {
+    private readonly connection: RTC_Websocket
+
+    constructor(
+        private wsUri: string,
+        private name: string
+    ) {
+        this.connection = new RTC_Websocket(wsUri).connect()
+        this.connection.onOpen(() => {
+            this.connection.send('join', name, {
+                type: 'room',
+                name: this.name,
+            })
+        })
+    }
+
+    onMessage(listener: (event: WSEvent) => void): RTC_Room {
+        this.connection.onMessage(listener)
+        return this
+    }
+
+    onEvent(name: string, listener: (event: WSEvent) => void): RTC_Room {
+        this.connection.onEvent(name, listener)
+        return this
+    }
+
+    send(data: any) {
+        return this.connection.send('message', data, {
+            type: 'room',
+            name: this.name,
+        })
+    }
+
+    leave() {
+        return this.connection.send('leave', null, {
+            type: 'room',
+            name: this.name,
+        })
+    }
+
+    getConnection(): RTC_Websocket {
+        return this.connection;
+    }
+}
+
 class RTC_Websocket {
     private websocket: WebSocket;
     private reconnectionInterval: number = 1000;
@@ -60,17 +120,15 @@ class RTC_Websocket {
         this.event = new RTC_Event();
 
         // HANDLE MESSAGE/EVENT DISPATCH WHEN DOM FINISHED LOADING
-        this.onReady(() => {
-            // Inspect messages and dispatch event
-            this.onMessage((payload) => {
-                if (payload.event) {
-                    // Dispatch unfiltered event events
-                    this.event.dispatch('event', [payload]);
+        // Inspect messages and dispatch event
+        this.onMessage((payload) => {
+            if (payload.event) {
+                // Dispatch unfiltered event events
+                this.event.dispatch('event', [payload]);
 
-                    // Dispatch filtered event event
-                    this.event.dispatch('event.' + payload.event, [payload]);
-                }
-            });
+                // Dispatch filtered event event
+                this.event.dispatch('event.' + payload.event, [payload]);
+            }
         });
     }
 
@@ -103,7 +161,7 @@ class RTC_Websocket {
      * This event fires when a connection is opened/created
      * @param listener
      */
-    onOpen(listener): RTC_Websocket {
+    onOpen(listener: () => void): RTC_Websocket {
         this.event.on('open', listener);
         return this;
     };
@@ -112,12 +170,12 @@ class RTC_Websocket {
      * This event fires when message is received
      * @param listener
      */
-    onMessage(listener): RTC_Websocket {
+    onMessage(listener: (event: any) => void): RTC_Websocket {
         this.event.on('message', (payload: any) => {
             if ('string' === typeof payload.data) {
-                listener(JSON.parse(payload.data), payload)
+                listener(JSON.parse(payload.data))
             } else {
-                listener(payload, payload);
+                listener(payload);
             }
         });
 
@@ -130,7 +188,7 @@ class RTC_Websocket {
      * @param event {string}
      * @param listener {callback}
      */
-    onEvent(event: string, listener: CallableFunction): RTC_Websocket {
+    onEvent(event: string, listener: (event: WSEvent) => void): RTC_Websocket {
         this.event.on('event.' + event, listener);
         return this;
     };
@@ -267,14 +325,15 @@ class RTC_Websocket {
      * Send message to websocket server
      * @param event {any} event name
      * @param message {array|object|int|float|string} message
+     * @param receiver {LooseObject}
      * @return Promise
      */
-    send(event: string, message: {} = {}): Promise<any> {
+    send(event: string, message: any, receiver: LooseObject = {}): Promise<any> {
         event = JSON.stringify({
             event: event,
             message: message,
+            receiver: receiver,
             time: new Date().getTime(),
-            token: this.defaultAuthToken
         });
 
         //Send message
@@ -343,6 +402,10 @@ class RTC_Websocket {
         this.websocket = new WebSocket(this.wsUri, []);
 
         this.websocket.addEventListener('open', (...args) => {
+            if (this.defaultAuthToken) {
+                this.send('auth.token', this.defaultAuthToken)
+            }
+
             if ('reconnecting' === this.connectionState) {
                 this.event.dispatch('reconnect');
             }
