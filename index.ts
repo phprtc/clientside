@@ -130,7 +130,7 @@ class RTC_Room {
 
 class RTC_Websocket {
     private websocket: WebSocket;
-    private reconnectionInterval: number = 1000;
+    private reconnectionInterval: number = 5_000;
     private connectionState: string = 'standby';
     private willReconnect: boolean = true;
     private eventEmitter: RTC_EventEmitter;
@@ -138,6 +138,8 @@ class RTC_Websocket {
     private defaultAuthToken: string | null = null;
     private reconnectionTimeout: NodeJS.Timeout;
     private rooms: RTC_Room[] = []
+    private pingPongInterval: number = 20_000;
+    private pingPongIntervalTimer: NodeJS.Timer;
 
     static create(uri: string, options: any[] = [], user_info?: LooseObject) {
         const ws = (new RTC_Websocket(uri, options, user_info)).connect()
@@ -251,27 +253,17 @@ class RTC_Websocket {
         return null
     }
 
+    setPingPongInterval(ms: number): RTC_Websocket {
+        this.pingPongInterval = ms
+        return this
+    }
+
     /**
      * This event fires when message is received
      * @param listener
      */
     onMessage(listener: (event: RTC_WSEvent) => void): RTC_Websocket {
-        this.eventEmitter.on('message', (e: MessageEvent) => {
-            let event: RTC_WSEvent = JSON.parse(e.data);
-
-            // User Info needs double parsing
-            if (event.sender.info) {
-                event.sender.info = JSON.parse(event.sender.info)
-            }
-
-            // User Info needs double parsing
-            if (event.meta && event.meta.user_info) {
-                event.meta.user_info = JSON.parse(event.meta.user_info)
-            }
-
-            listener(event);
-        });
-
+        this.eventEmitter.on('message', listener);
         return this;
     };
 
@@ -410,6 +402,7 @@ class RTC_Websocket {
         this.willReconnect = false;
         this.closeConnection(false)
         clearTimeout(this.reconnectionTimeout);
+        this.clearPingPongInterval()
         this.eventEmitter.dispatch('custom.disconnect');
     };
 
@@ -459,6 +452,10 @@ class RTC_Websocket {
         console.log(message);
     };
 
+    private clearPingPongInterval(): void {
+        clearInterval(this.pingPongIntervalTimer);
+    }
+
     private changeState(stateName: string, event: any[]): void {
         this.connectionState = stateName;
 
@@ -478,6 +475,23 @@ class RTC_Websocket {
         this.websocket.close();
     };
 
+    private closeNativeWebsocketConnection(): void {
+        if (this.websocket) {
+            if (this.websocket.readyState === WebSocket.OPEN) {
+                this.websocket.close()
+            }
+
+            if (this.websocket.readyState === WebSocket.CONNECTING) {
+                let interval = setInterval(() => {
+                    if (this.websocket.readyState === WebSocket.OPEN) {
+                        this.websocket.close()
+                        clearInterval(interval);
+                    }
+                }, 250)
+            }
+        }
+    }
+
     private createSocket(isReconnecting: boolean = false): void {
         if (true === isReconnecting) {
             this.connectionState = 'reconnecting';
@@ -492,6 +506,8 @@ class RTC_Websocket {
             this.wsUri = 'ws://' + window.location.host + this.wsUri;
         }
 
+        this.closeNativeWebsocketConnection()
+
         this.websocket = new WebSocket(this.wsUri, []);
 
         this.websocket.addEventListener('open', (...args) => {
@@ -503,14 +519,36 @@ class RTC_Websocket {
                 this.eventEmitter.dispatch('reconnect');
             }
 
+            // Ping pong
+            this.pingPongIntervalTimer = setInterval(() => {
+                this.send('ping', {message: 'ping'})
+            }, this.pingPongInterval)
+
             this.changeState('open', args);
         });
 
-        this.websocket.addEventListener('message', (event: MessageEvent) => {
+        this.websocket.addEventListener('message', (e: MessageEvent) => {
+            let event: RTC_WSEvent = JSON.parse(e.data);
+
+            if (event.event === 'pong') {
+                return;
+            }
+
+            // User Info needs double parsing
+            if (event.sender.info) {
+                event.sender.info = JSON.parse(event.sender.info)
+            }
+
+            // User Info needs double parsing
+            if (event.meta && event.meta.user_info) {
+                event.meta.user_info = JSON.parse(event.meta.user_info)
+            }
+
             this.eventEmitter.dispatch('message', [event]);
         });
 
         this.websocket.addEventListener('close', (...args) => {
+            this.clearPingPongInterval()
             this.changeState('close', args);
         });
 
