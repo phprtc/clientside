@@ -2,7 +2,7 @@ interface LooseObject {
     [key: string]: any
 }
 
-interface WSEvent {
+interface RTC_WSEvent {
     event: string
     time: number
     data: {
@@ -10,10 +10,19 @@ interface WSEvent {
         sender_type: string
         sender_sid?: string
     }
+    sender: {
+        type: string
+        id: string
+        info?: any
+    }
+    receiver: {
+        type: string
+        id: string
+    }
     meta?: LooseObject
 }
 
-class RTC_Event {
+class RTC_EventEmitter {
     listeners: {};
 
     constructor() {
@@ -59,47 +68,63 @@ class RTC_Event {
 }
 
 class RTC_Room {
-    private readonly connection: RTC_Websocket
-
     constructor(
-        private wsUri: string,
-        private name: string
+        public readonly name: string,
+        private readonly connection: RTC_Websocket,
+        private readonly eventEmitter = new RTC_EventEmitter()
     ) {
-        this.connection = new RTC_Websocket(wsUri).connect()
-        this.connection.onOpen(() => {
-            this.connection.send('join', name, {
-                type: 'room',
-                name: this.name,
-            })
-        })
-    }
-
-    onMessage(listener: (event: WSEvent) => void): RTC_Room {
-        this.connection.onMessage(listener)
-        return this
-    }
-
-    onEvent(name: string, listener: (event: WSEvent) => void): RTC_Room {
-        this.connection.onEvent(name, listener)
-        return this
-    }
-
-    send(data: any) {
-        return this.connection.send('message', data, {
+        const joinRoom = () => this.connection.send('join', name, {
             type: 'room',
-            name: this.name,
+            id: this.name,
+        });
+
+        if (this.connection.isOpened()) {
+            joinRoom()
+        } else {
+            this.connection.onOpen(joinRoom)
+        }
+    }
+
+    onMessage(listener: (event: RTC_WSEvent) => void): RTC_Room {
+        this.eventEmitter.on('message', listener)
+        return this
+    }
+
+    on(name: string, listener: (event: RTC_WSEvent) => void): RTC_Room {
+        this.eventEmitter.on(name, listener)
+        return this
+    }
+
+    once(name: string, listener: (event: RTC_WSEvent) => void): RTC_Room {
+        this.eventEmitter.once(name, listener)
+        return this
+    }
+
+    onAllEvents(listener: (event: RTC_WSEvent) => void): RTC_Room {
+        this.on('all_events', listener);
+        return this
+    }
+
+    send(event: string, data: any) {
+        return this.connection.send(event, data, {
+            type: 'room',
+            id: this.name,
         })
     }
 
     leave() {
         return this.connection.send('leave', null, {
             type: 'room',
-            name: this.name,
+            id: this.name,
         })
     }
 
     getConnection(): RTC_Websocket {
         return this.connection;
+    }
+
+    emitEvent(name: string, event: RTC_WSEvent): void {
+        this.eventEmitter.dispatch(name, [event])
     }
 }
 
@@ -108,26 +133,50 @@ class RTC_Websocket {
     private reconnectionInterval: number = 1000;
     private connectionState: string = 'standby';
     private willReconnect: boolean = true;
-    private event: RTC_Event;
+    private eventEmitter: RTC_EventEmitter;
 
     private defaultAuthToken: string | null = null;
     private reconnectionTimeout: NodeJS.Timeout;
+    private rooms: RTC_Room[] = []
+
+    static create(uri: string, options: any[] = [], user_info?: LooseObject) {
+        const ws = (new RTC_Websocket(uri, options, user_info)).connect()
+
+        if (user_info) {
+            ws.onOpen(() => ws.attachInfo(user_info))
+        }
+
+        return ws;
+    }
 
     constructor(
         private wsUri: string,
-        private options: any[] = []
+        private options: any[] = [],
+        private user_info?: LooseObject,
     ) {
-        this.event = new RTC_Event();
+        this.eventEmitter = new RTC_EventEmitter();
 
         // HANDLE MESSAGE/EVENT DISPATCH WHEN DOM FINISHED LOADING
         // Inspect messages and dispatch event
-        this.onMessage((payload) => {
-            if (payload.event) {
+        this.onMessage((event) => {
+            if (event.event) {
                 // Dispatch unfiltered event events
-                this.event.dispatch('event', [payload]);
+                this.eventEmitter.dispatch('event', [event]);
 
                 // Dispatch filtered event event
-                this.event.dispatch('event.' + payload.event, [payload]);
+                this.eventEmitter.dispatch('event.' + event.event, [event]);
+
+                // Handle Room Events
+                if (event.receiver.type === 'room') {
+                    for (let i = 0; i < this.rooms.length; i++) {
+                        const room = this.rooms[i]
+                        if (room.name === event.receiver.id) {
+                            room.emitEvent('all_events', event)
+                            room.emitEvent(event.event, event)
+                            break;
+                        }
+                    }
+                }
             }
         });
     }
@@ -162,21 +211,65 @@ class RTC_Websocket {
      * @param listener
      */
     onOpen(listener: () => void): RTC_Websocket {
-        this.event.on('open', listener);
+        this.eventEmitter.on('open', listener);
         return this;
     };
+
+    attachInfo(info: LooseObject): RTC_Websocket {
+        this.send('attach_info', info, {
+            type: 'server',
+            id: 'server'
+        });
+
+        return this;
+    };
+
+    joinRoom(name: string): RTC_Room {
+        const room = new RTC_Room(name, this);
+        this.rooms.push(room)
+        return room
+    };
+
+    leaveRoom(name: string): void {
+        for (let i = 0; i < this.rooms.length; i++) {
+            const room = this.rooms[i]
+            if (room.name === name) {
+                room.leave().then(() => this.rooms.splice(i, 1))
+                break;
+            }
+        }
+    }
+
+    getRoom(name: string): RTC_Room | null {
+        for (let i = 0; i < this.rooms.length; i++) {
+            const room = this.rooms[i]
+            if (room.name === name) {
+                return room
+            }
+        }
+
+        return null
+    }
 
     /**
      * This event fires when message is received
      * @param listener
      */
-    onMessage(listener: (event: any) => void): RTC_Websocket {
-        this.event.on('message', (payload: any) => {
-            if ('string' === typeof payload.data) {
-                listener(JSON.parse(payload.data))
-            } else {
-                listener(payload);
+    onMessage(listener: (event: RTC_WSEvent) => void): RTC_Websocket {
+        this.eventEmitter.on('message', (e: MessageEvent) => {
+            let event: RTC_WSEvent = JSON.parse(e.data);
+
+            // User Info needs double parsing
+            if (event.sender.info) {
+                event.sender.info = JSON.parse(event.sender.info)
             }
+
+            // User Info needs double parsing
+            if (event.meta && event.meta.user_info) {
+                event.meta.user_info = JSON.parse(event.meta.user_info)
+            }
+
+            listener(event);
         });
 
         return this;
@@ -188,8 +281,8 @@ class RTC_Websocket {
      * @param event {string}
      * @param listener {callback}
      */
-    onEvent(event: string, listener: (event: WSEvent) => void): RTC_Websocket {
-        this.event.on('event.' + event, listener);
+    onEvent(event: string, listener: (event: RTC_WSEvent) => void): RTC_Websocket {
+        this.eventEmitter.on('event.' + event, listener);
         return this;
     };
 
@@ -199,7 +292,7 @@ class RTC_Websocket {
      * @param listener
      */
     onAnyEvent(listener: CallableFunction): RTC_Websocket {
-        this.event.on('event', listener);
+        this.eventEmitter.on('event', listener);
         return this;
     };
 
@@ -209,7 +302,7 @@ class RTC_Websocket {
      * @param listener
      */
     onClose(listener: CallableFunction): RTC_Websocket {
-        this.event.on('close', listener);
+        this.eventEmitter.on('close', listener);
         return this;
     };
 
@@ -219,7 +312,7 @@ class RTC_Websocket {
      * @param listener
      */
     onDisconnect(listener: CallableFunction): RTC_Websocket {
-        this.event.on('custom.disconnect', listener);
+        this.eventEmitter.on('custom.disconnect', listener);
         return this;
     };
 
@@ -228,7 +321,7 @@ class RTC_Websocket {
      * @param listener
      */
     onError(listener: CallableFunction): RTC_Websocket {
-        this.event.on('error', listener);
+        this.eventEmitter.on('error', listener);
         return this;
     };
 
@@ -237,7 +330,7 @@ class RTC_Websocket {
      * @param listener
      */
     onConnecting(listener: CallableFunction): RTC_Websocket {
-        this.event.on('connecting', listener);
+        this.eventEmitter.on('connecting', listener);
         return this;
     };
 
@@ -246,7 +339,7 @@ class RTC_Websocket {
      * @param listener
      */
     onReconnecting(listener: CallableFunction): RTC_Websocket {
-        this.event.on('reconnecting', listener);
+        this.eventEmitter.on('reconnecting', listener);
         return this;
     };
 
@@ -255,7 +348,7 @@ class RTC_Websocket {
      * @param listener
      */
     onReconnect(listener: CallableFunction): RTC_Websocket {
-        this.event.on('reconnect', listener);
+        this.eventEmitter.on('reconnect', listener);
         return this;
     };
 
@@ -317,7 +410,7 @@ class RTC_Websocket {
         this.willReconnect = false;
         this.closeConnection(false)
         clearTimeout(this.reconnectionTimeout);
-        this.event.dispatch('custom.disconnect');
+        this.eventEmitter.dispatch('custom.disconnect');
     };
 
 
@@ -350,7 +443,7 @@ class RTC_Websocket {
                 //Send message when connection is recovered
             } else {
                 this.log('Your message will be sent when server connection is recovered!');
-                this.event.once('open', () => {
+                this.eventEmitter.once('open', () => {
                     try {
                         this.websocket.send(event);
                         resolve(this);
@@ -373,7 +466,7 @@ class RTC_Websocket {
             this.reconnect();
         }
 
-        this.event.dispatch(stateName, [event]);
+        this.eventEmitter.dispatch(stateName, [event]);
     };
 
     private closeConnection(reconnect: boolean = false): void {
@@ -388,10 +481,10 @@ class RTC_Websocket {
     private createSocket(isReconnecting: boolean = false): void {
         if (true === isReconnecting) {
             this.connectionState = 'reconnecting';
-            this.event.dispatch('reconnecting');
+            this.eventEmitter.dispatch('reconnecting');
         } else {
             this.connectionState = 'connecting';
-            this.event.dispatch('connecting');
+            this.eventEmitter.dispatch('connecting');
 
         }
 
@@ -407,14 +500,14 @@ class RTC_Websocket {
             }
 
             if ('reconnecting' === this.connectionState) {
-                this.event.dispatch('reconnect');
+                this.eventEmitter.dispatch('reconnect');
             }
 
             this.changeState('open', args);
         });
 
-        this.websocket.addEventListener('message', (...args) => {
-            this.event.dispatch('message', args);
+        this.websocket.addEventListener('message', (event: MessageEvent) => {
+            this.eventEmitter.dispatch('message', [event]);
         });
 
         this.websocket.addEventListener('close', (...args) => {

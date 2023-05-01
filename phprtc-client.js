@@ -1,24 +1,24 @@
 "use strict";
-var RTC_Event = /** @class */ (function () {
-    function RTC_Event() {
+var RTC_EventEmitter = /** @class */ (function () {
+    function RTC_EventEmitter() {
         this.listeners = {
             'on': {},
             'once': {}
         };
     }
-    RTC_Event.prototype.on = function (name, listener) {
+    RTC_EventEmitter.prototype.on = function (name, listener) {
         if (!this.listeners['on'][name]) {
             this.listeners['on'][name] = [];
         }
         this.listeners['on'][name].push(listener);
     };
-    RTC_Event.prototype.once = function (name, listener) {
+    RTC_EventEmitter.prototype.once = function (name, listener) {
         if (!this.listeners['once'][name]) {
             this.listeners['once'][name] = [];
         }
         this.listeners['once'][name].push(listener);
     };
-    RTC_Event.prototype.dispatch = function (name, data) {
+    RTC_EventEmitter.prototype.dispatch = function (name, data) {
         if (data === void 0) { data = []; }
         var regularEvent = this.listeners['on'];
         if (regularEvent.hasOwnProperty(name)) {
@@ -34,68 +34,105 @@ var RTC_Event = /** @class */ (function () {
             delete onceEvent[name];
         }
     };
-    return RTC_Event;
+    return RTC_EventEmitter;
 }());
 var RTC_Room = /** @class */ (function () {
-    function RTC_Room(wsUri, name) {
+    function RTC_Room(name, connection, eventEmitter) {
+        if (eventEmitter === void 0) { eventEmitter = new RTC_EventEmitter(); }
         var _this = this;
-        this.wsUri = wsUri;
         this.name = name;
-        this.connection = new RTC_Websocket(wsUri).connect();
-        this.connection.onOpen(function () {
-            _this.connection.send('join', name, {
-                type: 'room',
-                name: _this.name,
-            });
-        });
+        this.connection = connection;
+        this.eventEmitter = eventEmitter;
+        var joinRoom = function () { return _this.connection.send('join', name, {
+            type: 'room',
+            id: _this.name,
+        }); };
+        if (this.connection.isOpened()) {
+            joinRoom();
+        }
+        else {
+            this.connection.onOpen(joinRoom);
+        }
     }
     RTC_Room.prototype.onMessage = function (listener) {
-        this.connection.onMessage(listener);
+        this.eventEmitter.on('message', listener);
         return this;
     };
-    RTC_Room.prototype.onEvent = function (name, listener) {
-        this.connection.onEvent(name, listener);
+    RTC_Room.prototype.on = function (name, listener) {
+        this.eventEmitter.on(name, listener);
         return this;
     };
-    RTC_Room.prototype.send = function (data) {
-        return this.connection.send('message', data, {
+    RTC_Room.prototype.once = function (name, listener) {
+        this.eventEmitter.once(name, listener);
+        return this;
+    };
+    RTC_Room.prototype.onAllEvents = function (listener) {
+        this.on('all_events', listener);
+        return this;
+    };
+    RTC_Room.prototype.send = function (event, data) {
+        return this.connection.send(event, data, {
             type: 'room',
-            name: this.name,
+            id: this.name,
         });
     };
     RTC_Room.prototype.leave = function () {
         return this.connection.send('leave', null, {
             type: 'room',
-            name: this.name,
+            id: this.name,
         });
     };
     RTC_Room.prototype.getConnection = function () {
         return this.connection;
     };
+    RTC_Room.prototype.emitEvent = function (name, event) {
+        this.eventEmitter.dispatch(name, [event]);
+    };
     return RTC_Room;
 }());
 var RTC_Websocket = /** @class */ (function () {
-    function RTC_Websocket(wsUri, options) {
+    function RTC_Websocket(wsUri, options, user_info) {
         if (options === void 0) { options = []; }
         var _this = this;
         this.wsUri = wsUri;
         this.options = options;
+        this.user_info = user_info;
         this.reconnectionInterval = 1000;
         this.connectionState = 'standby';
         this.willReconnect = true;
         this.defaultAuthToken = null;
-        this.event = new RTC_Event();
+        this.rooms = [];
+        this.eventEmitter = new RTC_EventEmitter();
         // HANDLE MESSAGE/EVENT DISPATCH WHEN DOM FINISHED LOADING
         // Inspect messages and dispatch event
-        this.onMessage(function (payload) {
-            if (payload.event) {
+        this.onMessage(function (event) {
+            if (event.event) {
                 // Dispatch unfiltered event events
-                _this.event.dispatch('event', [payload]);
+                _this.eventEmitter.dispatch('event', [event]);
                 // Dispatch filtered event event
-                _this.event.dispatch('event.' + payload.event, [payload]);
+                _this.eventEmitter.dispatch('event.' + event.event, [event]);
+                // Handle Room Events
+                if (event.receiver.type === 'room') {
+                    for (var i = 0; i < _this.rooms.length; i++) {
+                        var room = _this.rooms[i];
+                        if (room.name === event.receiver.id) {
+                            room.emitEvent('all_events', event);
+                            room.emitEvent(event.event, event);
+                            break;
+                        }
+                    }
+                }
             }
         });
     }
+    RTC_Websocket.create = function (uri, options, user_info) {
+        if (options === void 0) { options = []; }
+        var ws = (new RTC_Websocket(uri, options, user_info)).connect();
+        if (user_info) {
+            ws.onOpen(function () { return ws.attachInfo(user_info); });
+        }
+        return ws;
+    };
     /**
      * Check if connection is opened
      * @returns {boolean}
@@ -125,22 +162,65 @@ var RTC_Websocket = /** @class */ (function () {
      * @param listener
      */
     RTC_Websocket.prototype.onOpen = function (listener) {
-        this.event.on('open', listener);
+        this.eventEmitter.on('open', listener);
         return this;
     };
     ;
+    RTC_Websocket.prototype.attachInfo = function (info) {
+        this.send('attach_info', info, {
+            type: 'server',
+            id: 'server'
+        });
+        return this;
+    };
+    ;
+    RTC_Websocket.prototype.joinRoom = function (name) {
+        var room = new RTC_Room(name, this);
+        this.rooms.push(room);
+        return room;
+    };
+    ;
+    RTC_Websocket.prototype.leaveRoom = function (name) {
+        var _this = this;
+        var _loop_1 = function (i) {
+            var room = this_1.rooms[i];
+            if (room.name === name) {
+                room.leave().then(function () { return _this.rooms.splice(i, 1); });
+                return "break";
+            }
+        };
+        var this_1 = this;
+        for (var i = 0; i < this.rooms.length; i++) {
+            var state_1 = _loop_1(i);
+            if (state_1 === "break")
+                break;
+        }
+    };
+    RTC_Websocket.prototype.getRoom = function (name) {
+        for (var i = 0; i < this.rooms.length; i++) {
+            var room = this.rooms[i];
+            if (room.name === name) {
+                return room;
+            }
+        }
+        return null;
+    };
     /**
      * This event fires when message is received
      * @param listener
      */
     RTC_Websocket.prototype.onMessage = function (listener) {
-        this.event.on('message', function (payload) {
-            if ('string' === typeof payload.data) {
-                listener(JSON.parse(payload.data));
+        this.eventEmitter.on('message', function (e) {
+            var event = JSON.parse(e.data);
+            // User Info needs double parsing
+            if (event.sender.info) {
+                event.sender.info = JSON.parse(event.sender.info);
             }
-            else {
-                listener(payload);
+            // User Info needs double parsing
+            if (event.meta && event.meta.user_info) {
+                event.meta.user_info = JSON.parse(event.meta.user_info);
             }
+            listener(event);
         });
         return this;
     };
@@ -152,7 +232,7 @@ var RTC_Websocket = /** @class */ (function () {
      * @param listener {callback}
      */
     RTC_Websocket.prototype.onEvent = function (event, listener) {
-        this.event.on('event.' + event, listener);
+        this.eventEmitter.on('event.' + event, listener);
         return this;
     };
     ;
@@ -162,7 +242,7 @@ var RTC_Websocket = /** @class */ (function () {
      * @param listener
      */
     RTC_Websocket.prototype.onAnyEvent = function (listener) {
-        this.event.on('event', listener);
+        this.eventEmitter.on('event', listener);
         return this;
     };
     ;
@@ -172,7 +252,7 @@ var RTC_Websocket = /** @class */ (function () {
      * @param listener
      */
     RTC_Websocket.prototype.onClose = function (listener) {
-        this.event.on('close', listener);
+        this.eventEmitter.on('close', listener);
         return this;
     };
     ;
@@ -182,7 +262,7 @@ var RTC_Websocket = /** @class */ (function () {
      * @param listener
      */
     RTC_Websocket.prototype.onDisconnect = function (listener) {
-        this.event.on('custom.disconnect', listener);
+        this.eventEmitter.on('custom.disconnect', listener);
         return this;
     };
     ;
@@ -191,7 +271,7 @@ var RTC_Websocket = /** @class */ (function () {
      * @param listener
      */
     RTC_Websocket.prototype.onError = function (listener) {
-        this.event.on('error', listener);
+        this.eventEmitter.on('error', listener);
         return this;
     };
     ;
@@ -200,7 +280,7 @@ var RTC_Websocket = /** @class */ (function () {
      * @param listener
      */
     RTC_Websocket.prototype.onConnecting = function (listener) {
-        this.event.on('connecting', listener);
+        this.eventEmitter.on('connecting', listener);
         return this;
     };
     ;
@@ -209,7 +289,7 @@ var RTC_Websocket = /** @class */ (function () {
      * @param listener
      */
     RTC_Websocket.prototype.onReconnecting = function (listener) {
-        this.event.on('reconnecting', listener);
+        this.eventEmitter.on('reconnecting', listener);
         return this;
     };
     ;
@@ -218,7 +298,7 @@ var RTC_Websocket = /** @class */ (function () {
      * @param listener
      */
     RTC_Websocket.prototype.onReconnect = function (listener) {
-        this.event.on('reconnect', listener);
+        this.eventEmitter.on('reconnect', listener);
         return this;
     };
     ;
@@ -274,7 +354,7 @@ var RTC_Websocket = /** @class */ (function () {
         this.willReconnect = false;
         this.closeConnection(false);
         clearTimeout(this.reconnectionTimeout);
-        this.event.dispatch('custom.disconnect');
+        this.eventEmitter.dispatch('custom.disconnect');
     };
     ;
     /**
@@ -308,7 +388,7 @@ var RTC_Websocket = /** @class */ (function () {
             }
             else {
                 _this.log('Your message will be sent when server connection is recovered!');
-                _this.event.once('open', function () {
+                _this.eventEmitter.once('open', function () {
                     try {
                         _this.websocket.send(event);
                         resolve(_this);
@@ -330,7 +410,7 @@ var RTC_Websocket = /** @class */ (function () {
         if ('close' === stateName && this.willReconnect) {
             this.reconnect();
         }
-        this.event.dispatch(stateName, [event]);
+        this.eventEmitter.dispatch(stateName, [event]);
     };
     ;
     RTC_Websocket.prototype.closeConnection = function (reconnect) {
@@ -347,11 +427,11 @@ var RTC_Websocket = /** @class */ (function () {
         if (isReconnecting === void 0) { isReconnecting = false; }
         if (true === isReconnecting) {
             this.connectionState = 'reconnecting';
-            this.event.dispatch('reconnecting');
+            this.eventEmitter.dispatch('reconnecting');
         }
         else {
             this.connectionState = 'connecting';
-            this.event.dispatch('connecting');
+            this.eventEmitter.dispatch('connecting');
         }
         if (this.wsUri.indexOf('ws://') === -1 && this.wsUri.indexOf('wss://') === -1) {
             this.wsUri = 'ws://' + window.location.host + this.wsUri;
@@ -366,16 +446,12 @@ var RTC_Websocket = /** @class */ (function () {
                 _this.send('auth.token', _this.defaultAuthToken);
             }
             if ('reconnecting' === _this.connectionState) {
-                _this.event.dispatch('reconnect');
+                _this.eventEmitter.dispatch('reconnect');
             }
             _this.changeState('open', args);
         });
-        this.websocket.addEventListener('message', function () {
-            var args = [];
-            for (var _i = 0; _i < arguments.length; _i++) {
-                args[_i] = arguments[_i];
-            }
-            _this.event.dispatch('message', args);
+        this.websocket.addEventListener('message', function (event) {
+            _this.eventEmitter.dispatch('message', [event]);
         });
         this.websocket.addEventListener('close', function () {
             var args = [];
