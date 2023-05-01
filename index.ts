@@ -410,14 +410,14 @@ class RTC_Websocket {
     /**
      * Send message to websocket server
      * @param event {any} event name
-     * @param message {array|object|int|float|string} message
+     * @param data {array|object|int|float|string} message
      * @param receiver {LooseObject}
      * @return Promise
      */
-    send(event: string, message: any, receiver: LooseObject = {}): Promise<any> {
+    send(event: string, data: any, receiver: LooseObject = {}): Promise<any> {
         event = JSON.stringify({
             event: event,
-            message: message,
+            data: data,
             receiver: receiver,
             time: new Date().getTime(),
         });
@@ -521,7 +521,10 @@ class RTC_Websocket {
 
             // Ping pong
             this.pingPongIntervalTimer = setInterval(() => {
-                this.send('ping', {message: 'ping'})
+                this.send('ping', {message: 'ping'}, {
+                    type: 'system',
+                    id: 'system'
+                })
             }, this.pingPongInterval)
 
             this.changeState('open', args);
