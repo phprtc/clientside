@@ -3,10 +3,12 @@ interface LooseObject {
 }
 
 interface RTC_WSEvent {
-    event: string
     time: number
+    event: string
+    status: number
     data: {
         message: string
+        reason?: string
         sender_type: string
         sender_sid?: string
     }
@@ -133,6 +135,7 @@ class RTC_Websocket {
     private reconnectionInterval: number = 5_000;
     private connectionState: string = 'standby';
     private willReconnect: boolean = true;
+    private canReconnect: boolean = true;
     private eventEmitter: RTC_EventEmitter;
 
     private defaultAuthToken: string | null = null;
@@ -167,6 +170,15 @@ class RTC_Websocket {
 
                 // Dispatch filtered event event
                 this.eventEmitter.dispatch('event.' + event.event, [event]);
+
+                // Handle server intentional disconnection
+                if (event.event === 'conn.rejected') {
+                    this.stopPingPong()
+                    this.stopReconnectionTimeout()
+                    this.canReconnect = false
+
+                    this.log(`Server rejected connection: ${this.wsUri}\nReason: ${event.data.message}`)
+                }
 
                 // Handle Room Events
                 if (event.receiver.type === 'room') {
@@ -255,6 +267,8 @@ class RTC_Websocket {
 
     setPingPongInterval(ms: number): RTC_Websocket {
         this.pingPongInterval = ms
+        this.stopPingPong()
+        this.startPingPong()
         return this
     }
 
@@ -373,13 +387,15 @@ class RTC_Websocket {
      * Manually reconnect this connection
      */
     reconnect(): void {
-        this.closeConnection(true);
+        if (this.canReconnect) {
+            this.closeConnection(true);
 
-        if (this.reconnectionInterval) {
-            this.reconnectionTimeout = setTimeout(
-                () => this.createSocket(true),
-                this.reconnectionInterval
-            );
+            if (this.reconnectionInterval) {
+                this.reconnectionTimeout = setTimeout(
+                    () => this.createSocket(true),
+                    this.reconnectionInterval
+                );
+            }
         }
     };
 
@@ -400,9 +416,9 @@ class RTC_Websocket {
      */
     close() {
         this.willReconnect = false;
+        this.stopPingPong()
+        this.stopReconnectionTimeout()
         this.closeConnection(false)
-        clearTimeout(this.reconnectionTimeout);
-        this.clearPingPongInterval()
         this.eventEmitter.dispatch('custom.disconnect');
     };
 
@@ -435,7 +451,7 @@ class RTC_Websocket {
 
                 //Send message when connection is recovered
             } else {
-                this.log('Your message will be sent when server connection is recovered!');
+                this.log(`Your message will be sent when server connection is recovered, server:${this.wsUri}`);
                 this.eventEmitter.once('open', () => {
                     try {
                         this.websocket.send(event);
@@ -452,8 +468,21 @@ class RTC_Websocket {
         console.log(message);
     };
 
-    private clearPingPongInterval(): void {
+    private startPingPong(): void {
+        this.pingPongIntervalTimer = setInterval(() => {
+            this.send('ping', {message: 'ping'}, {
+                type: 'system',
+                id: 'system'
+            })
+        }, this.pingPongInterval)
+    }
+
+    private stopPingPong(): void {
         clearInterval(this.pingPongIntervalTimer);
+    }
+
+    private stopReconnectionTimeout() {
+        clearTimeout(this.reconnectionTimeout);
     }
 
     private changeState(stateName: string, event: any[]): void {
@@ -493,7 +522,7 @@ class RTC_Websocket {
     }
 
     private createSocket(isReconnecting: boolean = false): void {
-        if (true === isReconnecting) {
+        if (isReconnecting) {
             this.connectionState = 'reconnecting';
             this.eventEmitter.dispatch('reconnecting');
         } else {
@@ -520,12 +549,7 @@ class RTC_Websocket {
             }
 
             // Ping pong
-            this.pingPongIntervalTimer = setInterval(() => {
-                this.send('ping', {message: 'ping'}, {
-                    type: 'system',
-                    id: 'system'
-                })
-            }, this.pingPongInterval)
+            this.startPingPong();
 
             this.changeState('open', args);
         });
@@ -551,7 +575,7 @@ class RTC_Websocket {
         });
 
         this.websocket.addEventListener('close', (...args) => {
-            this.clearPingPongInterval()
+            this.stopPingPong()
             this.changeState('close', args);
         });
 
