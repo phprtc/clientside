@@ -118,7 +118,7 @@ var RTC_Websocket = /** @class */ (function () {
                     _this.stopPingPong();
                     _this.stopReconnectionTimeout();
                     _this.canReconnect = false;
-                    _this.log("Server rejected connection: ".concat(_this.wsUri));
+                    _this.log("Server rejected connection: ".concat(_this.wsUri, ".\nReason: ").concat(event.data.reason));
                 }
                 // Handle Room Events
                 if (event.receiver.type === 'room') {

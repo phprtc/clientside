@@ -177,7 +177,7 @@ class RTC_Websocket {
                     this.stopReconnectionTimeout()
                     this.canReconnect = false
 
-                    this.log(`Server rejected connection: ${this.wsUri}\nReason: ${event.data.message}`)
+                    this.log(`Server rejected connection: ${this.wsUri}.\nReason: ${event.data.reason}`)
                 }
 
                 // Handle Room Events
