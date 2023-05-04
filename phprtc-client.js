@@ -217,7 +217,9 @@ var RTC_Websocket = /** @class */ (function () {
     RTC_Websocket.prototype.setPingPongInterval = function (ms) {
         this.pingPongInterval = ms;
         this.stopPingPong();
-        this.startPingPong();
+        if (this.isOpened()) {
+            this.startPingPong();
+        }
         return this;
     };
     /**

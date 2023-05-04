@@ -268,7 +268,11 @@ class RTC_Websocket {
     setPingPongInterval(ms: number): RTC_Websocket {
         this.pingPongInterval = ms
         this.stopPingPong()
-        this.startPingPong()
+
+        if (this.isOpened()) {
+            this.startPingPong()
+        }
+
         return this
     }
 
