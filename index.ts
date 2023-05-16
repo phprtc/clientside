@@ -75,7 +75,7 @@ class RTC_Room {
         private readonly connection: RTC_Websocket,
         private readonly eventEmitter = new RTC_EventEmitter()
     ) {
-        const joinRoom = () => this.connection.send('join', name, {
+        const joinRoom = () => this.connection.send('room_join', name, {
             type: 'room',
             id: this.name,
         });
@@ -87,8 +87,28 @@ class RTC_Room {
         }
     }
 
+    onJoined(listener: (event: RTC_WSEvent) => void): RTC_Room {
+        this.eventEmitter.on('room_joined', listener)
+        return this
+    }
+
+    onUserJoined(listener: (event: RTC_WSEvent) => void): RTC_Room {
+        this.eventEmitter.on('room_user_joined', listener)
+        return this
+    }
+
+    onUserLeft(listener: (event: RTC_WSEvent) => void): RTC_Room {
+        this.eventEmitter.on('room_user_left', listener)
+        return this
+    }
+
+    onWelcome(listener: (event: RTC_WSEvent) => void): RTC_Room {
+        this.eventEmitter.on('room_welcome', listener)
+        return this
+    }
+
     onMessage(listener: (event: RTC_WSEvent) => void): RTC_Room {
-        this.eventEmitter.on('message', listener)
+        this.eventEmitter.on('room_message', listener)
         return this
     }
 
@@ -114,8 +134,12 @@ class RTC_Room {
         })
     }
 
-    leave() {
-        return this.connection.send('leave', null, {
+    sendMessage(message: string) {
+        return this.send('room_message', message);
+    }
+
+    leave(reason = 'conn_close') {
+        return this.connection.send('room_leave', {reason}, {
             type: 'room',
             id: this.name,
         })
@@ -141,6 +165,7 @@ class RTC_Websocket {
     private defaultAuthToken: string | null = null;
     private reconnectionTimeout: NodeJS.Timeout;
     private rooms: RTC_Room[] = []
+    private isClientPingEnabled = false
     private pingPongInterval: number = 20_000;
     private pingPongIntervalTimer: NodeJS.Timer;
 
@@ -178,6 +203,7 @@ class RTC_Websocket {
                     this.canReconnect = false
 
                     this.log(`Server rejected connection: ${this.wsUri}.\nReason: ${event.data.reason}`)
+                    return;
                 }
 
                 // Handle Room Events
@@ -269,10 +295,15 @@ class RTC_Websocket {
         this.pingPongInterval = ms
         this.stopPingPong()
 
-        if (this.isOpened()) {
+        if (this.isClientPingEnabled && this.isOpened()) {
             this.startPingPong()
         }
 
+        return this
+    }
+
+    enableClientPing(): RTC_Websocket {
+        this.isClientPingEnabled = true
         return this
     }
 
@@ -422,8 +453,14 @@ class RTC_Websocket {
         this.willReconnect = false;
         this.stopPingPong()
         this.stopReconnectionTimeout()
-        this.closeConnection(false)
-        this.eventEmitter.dispatch('custom.disconnect');
+
+        // Leave Rooms First
+        this.rooms.forEach(room => room.leave())
+
+        setImmediate(() => {
+            this.closeConnection(false)
+            this.eventEmitter.dispatch('custom.disconnect');
+        })
     };
 
 
@@ -468,16 +505,21 @@ class RTC_Websocket {
         })
     };
 
+    private sendToSystem(event: string, data: any) {
+        return this.send(event, data, {
+            type: 'system',
+            id: 'system'
+        })
+
+    }
+
     private log(message: any): void {
         console.log(message);
     };
 
     private startPingPong(): void {
         this.pingPongIntervalTimer = setInterval(() => {
-            this.send('ping', {message: 'ping'}, {
-                type: 'system',
-                id: 'system'
-            })
+            this.sendToSystem('ping', {message: 'ping'})
         }, this.pingPongInterval)
     }
 
@@ -499,13 +541,17 @@ class RTC_Websocket {
         this.eventEmitter.dispatch(stateName, [event]);
     };
 
-    private closeConnection(reconnect: boolean = false): void {
+    private closeConnection(reconnect: boolean = false, reason = 'general'): void {
         if (reconnect) {
             this.willReconnect = true;
             this.connectionState = 'internal_reconnection';
         }
 
-        this.websocket.close();
+        if (this.isOpened()) {
+            this.sendToSystem('conn_close', {reason});
+        }
+
+        setImmediate(() => this.websocket.close());
     };
 
     private closeNativeWebsocketConnection(): void {
@@ -553,7 +599,9 @@ class RTC_Websocket {
             }
 
             // Ping pong
-            this.startPingPong();
+            if (this.isClientPingEnabled) {
+                this.startPingPong();
+            }
 
             this.changeState('open', args);
         });
@@ -562,6 +610,11 @@ class RTC_Websocket {
             let event: RTC_WSEvent = JSON.parse(e.data);
 
             if (event.event === 'pong') {
+                return;
+            }
+
+            if (event.event === 'ping') {
+                this.sendToSystem('pong', {message: 'pong'});
                 return;
             }
 
